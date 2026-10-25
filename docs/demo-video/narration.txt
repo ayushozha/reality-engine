@@ -1,0 +1,21 @@
+Hi I am Ayush and I made this with Kush.
+
+We built Reality Engine because a video shows you a space, but it doesn't give you objects you can move, measure, or use in a simulator.
+
+Our goal is to turn a phone walkthrough into an editable 3D starting point.
+
+Here's how it works. OpenCV selects stable frames, reconstructs the camera path and a colored point cloud, and estimates the floor.
+
+Gemini 4 Argon reads the whole video in one context. Zone workers inherit that reading and place named objects against the measured cameras and points. The engine supports running those workers in parallel.
+
+Then we render the reconstruction from the original camera positions. Argon watches real-versus-replica comparisons and revises the objects. That's our generate, render, critique, and repair loop for the More Dimensions track.
+
+Here is the actual phone clip we processed, and here is its reconstruction.
+
+We recovered forty-one camera poses and seven hundred ninety-four points. Argon identified the booth, stool, chair, desk, and other objects. After two critique rounds, this scene contains sixteen editable objects.
+
+I can orbit the scene, select an object, change its dimensions, and move it with snapping. I can also view through a recorded camera and overlay the original photo to see the mismatch directly.
+
+Finally, I can save and export the scene to glTF or MuJoCo.
+
+This is a working prototype, with coarse geometry. On this clip, about twenty-four percent of reconstructed points lie near a modeled surface. We're showing an editable starting point, with verification that exposes what still needs work.

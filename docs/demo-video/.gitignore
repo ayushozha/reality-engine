@@ -1,0 +1,7 @@
+/segments/
+/narration.wav
+/intro.png
+/pipeline.png
+/preview-*.jpg
+/capture/*
+!/capture/editor.webm

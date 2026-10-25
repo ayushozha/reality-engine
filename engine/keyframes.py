@@ -2,12 +2,16 @@
 
 Stability = sharp (high Laplacian variance) and still (low change from the previous frame).
 Every candidate's scores are kept in keyframes.json so later reasoning stages can see why a frame won.
+Timestamps are idx / fps from the container's declared rate; variable-frame-rate files are treated as constant-rate.
 """
 import json
+import math
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+from .scene import write_atomic
 
 SHARP_W = 640  # width used for the sharpness measure
 MOTION_W = 160  # width used for the motion measure
@@ -33,9 +37,15 @@ def select(video: Path, out_dir: Path, per_second: int = 8, max_seconds: int | N
     kdir = out_dir / "keyframes"
     kdir.mkdir(parents=True, exist_ok=True)
 
+    def first_frame(sec):
+        # First frame whose timestamp idx / fps is >= sec (exact at fractional rates like 29.97).
+        return int(math.ceil(sec * fps - 1e-9))
+
     def candidates_for(sec):
-        lo, hi = int(round(sec * fps)), int(round((sec + 1) * fps)) - 1
-        return set(np.unique(np.linspace(lo, max(lo, hi), per_second).round().astype(int)).tolist())
+        lo, hi = first_frame(sec), first_frame(sec + 1) - 1
+        if hi < lo:
+            return set()
+        return set(np.unique(np.linspace(lo, hi, per_second).round().astype(int)).tolist())
 
     out, prev_small, idx, sec = [], None, 0, 0
     cand_idx, best, cands = candidates_for(0), None, []
@@ -54,7 +64,7 @@ def select(video: Path, out_dir: Path, per_second: int = 8, max_seconds: int | N
             frame = cv2.resize(frame, (MAX_SAVE_W, round(h * MAX_SAVE_W / w)), interpolation=cv2.INTER_AREA)
         name = f"keyframes/kf_{sec:05d}.jpg"
         cv2.imwrite(str(out_dir / name), frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
-        out.append({"second": sec, "t": round(win["frame"] / fps, 3), "frame": win["frame"], "image": name,
+        out.append({"second": sec, "t": round(win["frame"] / fps, 6), "frame": win["frame"], "image": name,
                     "width": frame.shape[1], "height": frame.shape[0], "candidates": list(cands)})
 
     while True:
@@ -65,12 +75,12 @@ def select(video: Path, out_dir: Path, per_second: int = 8, max_seconds: int | N
         if idx in cand_idx:
             sharp = float(cv2.Laplacian(_gray(frame, SHARP_W), cv2.CV_64F).var())
             motion = float(np.abs(small - prev_small).mean()) if prev_small is not None else 0.0
-            cands.append({"frame": idx, "t": round(idx / fps, 3), "sharpness": round(sharp, 2), "motion": round(motion, 3)})
+            cands.append({"frame": idx, "t": round(idx / fps, 6), "sharpness": round(sharp, 2), "motion": round(motion, 3)})
             best = best or {}
             best[idx] = frame
         prev_small = small
         idx += 1
-        if idx >= round((sec + 1) * fps):
+        if idx >= first_frame(sec + 1):
             flush()
             sec += 1
             cand_idx, best, cands = candidates_for(sec), None, []
@@ -79,5 +89,5 @@ def select(video: Path, out_dir: Path, per_second: int = 8, max_seconds: int | N
     flush()
     cap.release()
     manifest = {"video": str(video), "fps": fps, "per_second": per_second, "keyframes": out}
-    (out_dir / "keyframes.json").write_text(json.dumps(manifest, indent=2))
+    write_atomic(out_dir / "keyframes.json", json.dumps(manifest, indent=2))
     return manifest

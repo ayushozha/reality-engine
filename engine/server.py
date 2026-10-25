@@ -3,10 +3,12 @@
     uv run python -m engine.server [--port 8765]
 """
 import argparse
+import hashlib
 import json
 import logging
 import mimetypes
 import re
+import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,11 +35,28 @@ def _safe(base: Path, rel: str) -> Path | None:
     return p if p.is_file() and p.is_relative_to(base.resolve()) else None
 
 
-def _start(run_dir: Path, **kw) -> bool:
+def _etag(run_dir: Path) -> str | None:
+    f = run_dir / "scene.json"
+    return '"' + hashlib.sha256(f.read_bytes()).hexdigest()[:32] + '"' if f.exists() else None
+
+
+def _claim(run_dir: Path) -> bool:
+    """One writer per run: the pipeline, a verify, or a save. Returns False if another holds it."""
     with _lock:
         if run_dir.name in _busy:
             return False
         _busy.add(run_dir.name)
+        return True
+
+
+def _release(run_dir: Path):
+    with _lock:
+        _busy.discard(run_dir.name)
+
+
+def _start(run_dir: Path, **kw) -> bool:
+    if not _claim(run_dir):
+        return False
 
     def work():
         try:
@@ -45,8 +64,7 @@ def _start(run_dir: Path, **kw) -> bool:
         except Exception:
             pass  # recorded in status.json by the pipeline
         finally:
-            with _lock:
-                _busy.discard(run_dir.name)
+            _release(run_dir)
     threading.Thread(target=work, daemon=True).start()
     return True
 
@@ -113,15 +131,17 @@ class Handler(BaseHTTPRequestHandler):
             if what == "scene.mjcf":
                 if not (d / "scene.json").exists():
                     return self._send(404, {"error": "no scene yet"})
-                return self._send(200, compile_mjcf(load(d / "scene.json"), dynamic=True), "application/xml",
-                                  {"Content-Disposition": f'attachment; filename="{d.name}.xml"'})
+                sc = load(d / "scene.json")
+                return self._send(200, compile_mjcf(sc, dynamic=True, scale=sc.calibration.meters_per_unit),
+                                  "application/xml", {"Content-Disposition": f'attachment; filename="{d.name}.xml"'})
             f = d / {"status": "status.json", "scene": "scene.json", "verify": "verify.json", "keyframes": "keyframes.json"}[what]
             if not f.exists():
                 return self._send(404, {"error": f"no {what} yet"})
             data = json.loads(f.read_text())
             if what == "status":
                 data["busy"] = d.name in _busy
-            return self._send(200, data)
+                data["scene_etag"] = _etag(d)
+            return self._send(200, data, extra={"ETag": _etag(d)} if what == "scene" else None)
         m = re.match(r"^/runs/([^/]+)/(.+)$", path)
         if m and (d := self._run_dir(m.group(1))):
             return self._file(_safe(d, m.group(2)))
@@ -139,8 +159,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, {"error": "unknown run"})
             if m.group(2) == "rebuild":
                 return self._send(202, {"started": True}) if _start(d) else self._send(409, {"error": "already running"})
-            scene = load(d / "scene.json")
-            return self._send(200, verify.run(scene, d, verify.load_points(d)))
+            if not _claim(d):
+                return self._send(409, {"error": "this run is busy (reconstruction or another verify); try again when it finishes"})
+            try:
+                return self._send(200, verify.run(load(d / "scene.json"), d, verify.load_points(d)))
+            finally:
+                _release(d)
         except (ValueError, ValidationError) as e:
             self._send(400, {"error": str(e)[:2000]})
 
@@ -151,11 +175,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "unknown run"})
         try:
             n = self._body(64 * 1024 ** 2)
-            scene = Scene.model_validate_json(self.rfile.read(n))
+            body = self.rfile.read(n)
+        except ValueError as e:
+            return self._send(400, {"error": str(e)})
+        if not _claim(d):
+            return self._send(409, {"error": "this run is being rebuilt or verified; your edits were not saved yet"})
+        try:
+            current, sent = _etag(d), self.headers.get("If-Match")
+            if current and sent != current:
+                return self._send(412, {"error": "the scene changed on the server since you loaded it; reload before saving"},
+                                  extra={"ETag": current})
+            scene = Scene.model_validate_json(body)
             save(scene, d / "scene.json")
-            self._send(200, {"ok": True, "objects": len(scene.objects)})
+            self._send(200, {"ok": True, "objects": len(scene.objects)}, extra={"ETag": _etag(d)})
         except (ValueError, ValidationError) as e:
             self._send(400, {"error": str(e)[:2000]})
+        finally:
+            _release(d)
 
     def _upload(self):
         name = Path(self.headers.get("X-Filename") or "video.mp4").name
@@ -163,9 +199,10 @@ class Handler(BaseHTTPRequestHandler):
         if ext not in VIDEO_EXT:
             raise ValueError(f"unsupported video type {ext or '(none)'}")
         n = self._body(MAX_UPLOAD)
-        run_id = (re.sub(r"[^a-z0-9]+", "-", Path(name).stem.lower()).strip("-")[:40] or "video") + time.strftime("-%H%M%S")
+        stem = re.sub(r"[^a-z0-9]+", "-", Path(name).stem.lower()).strip("-")[:40] or "video"
+        run_id = f"{stem}-{time.strftime('%H%M%S')}-{secrets.token_hex(3)}"
         d = RUNS / run_id
-        d.mkdir(parents=True, exist_ok=False)
+        d.mkdir(parents=True, exist_ok=False)  # 24 random bits per second: a collision is a real error
         with open(d / f"input{ext}", "wb") as f:
             left = n
             while left:

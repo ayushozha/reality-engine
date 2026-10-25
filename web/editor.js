@@ -22,7 +22,8 @@ function el(tag, props = {}, ...children) {
 async function api(path, opts = {}) {
   const r = await fetch(path, opts);
   const body = r.headers.get('content-type')?.includes('json') ? await r.json() : await r.text();
-  if (!r.ok) throw new Error(body?.error || r.statusText);
+  if (!r.ok) { const e = new Error(body?.error || r.statusText); e.status = r.status; throw e; }
+  api.etag = r.headers.get('ETag');
   return body;
 }
 function log(msg) { const l = $('log'); l.textContent = (msg + '\n' + l.textContent).slice(0, 20000); }
@@ -59,12 +60,14 @@ const UNIT = {
 };
 
 // ---------------------------------------------------------------- state
-let runId = null, sceneData = null, meshes = new Map(), selected = null, dirty = false;
+// runId = the run shown in the picker; sceneRun = the run sceneData was loaded from (saves go only there).
+let runId = null, sceneRun = null, sceneEtag = null, sceneData = null, meshes = new Map(), selected = null, dirty = false;
+let revision = 0;  // bumps on every local edit, so a save only clears "dirty" if nothing changed meanwhile
 let history = [], hIndex = -1, mode = 'select', measurePts = [], lastMeasure = null, photoCam = null;
 let pollTimer = null, loadedSceneFor = null;
 const mpu = () => sceneData?.calibration?.meters_per_unit || 1;
 
-function setDirty(v) { dirty = v; $('btn-save').textContent = v ? 'Save •' : 'Save'; }
+function setDirty(v) { if (v) revision++; dirty = v; $('btn-save').textContent = v ? 'Save •' : 'Save'; }
 
 // ---------------------------------------------------------------- objects <-> meshes
 function applyToMesh(m, o) {
@@ -91,13 +94,23 @@ function rebuildMeshes() {
   showProps();
 }
 const objById = (id) => sceneData.objects.find((o) => o.id === id);
+// Same rule as engine/scene.py: cylinders stay round (x = z) and spheres stay spheres, so the editor never shows
+// a shape that MuJoCo export and verification would represent differently.
+function shapeSize(kind, s) {
+  if (kind === 'cylinder') { const d = Math.max(s[0], s[2]); return [d, s[1], d]; }
+  if (kind === 'sphere') { const d = Math.max(...s); return [d, d, d]; }
+  return s;
+}
+function userEdited(o) { if (o.source === 'gemini') o.source = 'manual'; }  // edited objects survive rebuilds
 function syncFromMesh(m) {
   const o = objById(m.userData.id);
   if (!o) return;
   const r = (v) => Math.round(v * 10000) / 10000;
   o.position = [r(m.position.x), r(m.position.y), r(m.position.z)];
   o.rotation = [r(m.rotation.x / DEG), r(m.rotation.y / DEG), r(m.rotation.z / DEG)];
-  o.size = [Math.max(0.001, r(Math.abs(m.scale.x))), Math.max(0.001, r(Math.abs(m.scale.y))), Math.max(0.001, r(Math.abs(m.scale.z)))];
+  o.size = shapeSize(o.kind, [m.scale.x, m.scale.y, m.scale.z].map((v) => Math.max(0.001, r(Math.abs(v)))));
+  if (o.kind !== 'plane') m.scale.set(...o.size);
+  userEdited(o);
   setDirty(true);
 }
 
@@ -169,7 +182,8 @@ $('prop-form').addEventListener('change', () => {
   const k = mpu();
   o.position = v.slice(0, 3).map((x) => x / k);
   o.rotation = v.slice(3, 6);
-  o.size = v.slice(6, 9).map((x) => Math.max(0.001, x / k));
+  o.size = shapeSize(o.kind, v.slice(6, 9).map((x) => Math.max(0.001, x / k)));
+  userEdited(o);
   o.name = $('p-name').value.trim().slice(0, 80) || o.name;
   o.color = $('p-color').value; o.material = $('p-material').value.slice(0, 80);
   o.zone = $('p-zone').value.slice(0, 80); o.notes = $('p-notes').value.slice(0, 500); o.locked = $('p-locked').checked;
@@ -371,10 +385,11 @@ function buildCameras() {
     camera.position.set(ctr.x + 4, 3.5, ctr.z + 4);
   }
 }
-async function loadPoints() {
+async function loadPoints(id) {
   if (pointsObj) { world.remove(pointsObj); pointsObj.geometry.dispose(); pointsObj = null; pointsArr = null; }
   if (!sceneData.points) return;
-  const d = await api(`/runs/${runId}/${sceneData.points}`);
+  const d = await api(`/runs/${id}/${sceneData.points}`);
+  if (id !== runId) return;
   pointsArr = Float32Array.from(d.positions);
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(pointsArr, 3));
@@ -384,15 +399,21 @@ async function loadPoints() {
   world.add(pointsObj);
   log(`Loaded ${d.count.toLocaleString()} reconstructed points.`);
 }
-async function loadScene() {
-  sceneData = await api(`/api/runs/${runId}/scene`);
-  loadedSceneFor = runId;
-  history = [snapshot()]; hIndex = 0; setDirty(false); selected = null;
-  $('empty').hidden = true;
-  rebuildMeshes(); buildCameras(); showCalibration(); applySnap();
-  await loadPoints();
-  $('btn-mjcf').href = `/api/runs/${runId}/scene.mjcf`;
-  try { showVerify(await api(`/api/runs/${runId}/verify`)); } catch { $('verify-summary').textContent = 'Not verified yet.'; }
+async function loadScene(id, { keepView = false } = {}) {
+  const data = await api(`/api/runs/${id}/scene`);
+  const etag = api.etag;
+  if (id !== runId) return;  // the user switched runs while this was in flight
+  const keep = selected;
+  sceneData = data; sceneRun = id; sceneEtag = etag; loadedSceneFor = id;
+  history = [snapshot()]; hIndex = 0; setDirty(false); selected = keepView ? keep : null;
+  $('empty').hidden = true; $('btn-reload').hidden = true;
+  rebuildMeshes(); showCalibration(); applySnap();
+  if (!keepView) buildCameras();
+  await loadPoints(id);
+  if (id !== runId) return;
+  $('btn-mjcf').href = `/api/runs/${id}/scene.mjcf`;
+  try { const v = await api(`/api/runs/${id}/verify`); if (id === runId) showVerify(v); }
+  catch { if (id === runId) $('verify-summary').textContent = 'Not verified yet.'; }
 }
 function renderStages(st) {
   const box = $('stages');
@@ -401,32 +422,47 @@ function renderStages(st) {
     return el('span', { class: `stage ${v.state}`, title: v.detail || v.state, text: s });
   }));
 }
+let pollFailures = 0;
 async function poll() {
   if (!runId) return;
   const id = runId;
+  clearTimeout(pollTimer);
   try {
     const st = await api(`/api/runs/${id}/status`);
     if (id !== runId) return;
+    pollFailures = 0;
     renderStages(st);
     $('log').textContent = [...st.log].reverse().join('\n');
-    if (st.stages.scene?.state === 'done' && loadedSceneFor !== id) await loadScene();
-    if (st.stages.verify?.state === 'done' && loadedSceneFor === id && !dirty && st.busy === false && pollTimer) {
-      try { showVerify(await api(`/api/runs/${id}/verify`)); } catch { /* not written yet */ }
+    if (st.scene_etag && loadedSceneFor !== id) await loadScene(id);
+    else if (st.scene_etag && loadedSceneFor === id && st.scene_etag !== sceneEtag) {
+      // The pipeline (e.g. the Gemini build) rewrote the scene. Pull it in unless that would discard edits.
+      if (!dirty) { await loadScene(id, { keepView: true }); log('Scene updated from the pipeline.'); }
+      else $('btn-reload').hidden = false;
     }
+    if (id !== runId) return;
     const running = st.busy || Object.values(st.stages).some((v) => v.state === 'running');
-    clearTimeout(pollTimer);
     pollTimer = running ? setTimeout(poll, 2000) : null;
-  } catch (e) { log(`status: ${e.message}`); }
+  } catch (e) {
+    if (id !== runId) return;
+    pollFailures++;
+    log(`status: ${e.message} (retrying)`);
+    pollTimer = setTimeout(poll, Math.min(15000, 1000 * 2 ** pollFailures));  // transient errors don't stop polling
+  }
 }
+$('btn-reload').onclick = () => { if (runId) loadScene(runId, { keepView: true }); };
 async function loadRun(id) {
   if (dirty) log('Unsaved changes were discarded when switching runs.');
   clearTimeout(pollTimer); pollTimer = null;
-  runId = id; sceneData = null; loadedSceneFor = null; exitPhoto();
+  runId = id; sceneData = null; sceneRun = null; sceneEtag = null; loadedSceneFor = null; exitPhoto();
   objGroup.clear(); camGroup.clear(); measureGroup.clear(); $('strip').replaceChildren(); tc.detach();
+  measurePts = []; lastMeasure = null; setMode('select'); setDirty(false); selected = null;
+  $('measure-out').textContent = 'Click Measure, then two points.'; $('calib').textContent = '';
+  $('verify-summary').textContent = ''; $('verify-list').replaceChildren(); $('verify-img').hidden = true;
+  $('btn-reload').hidden = true;
   if (pointsObj) { world.remove(pointsObj); pointsObj = null; pointsArr = null; }
   $('empty').hidden = !!id; renderOutliner(); showProps();
   if (!id) return renderStages(null);
-  pollTimer = 1; await poll();
+  await poll();
 }
 async function refreshRuns(pick) {
   const runs = await api('/api/runs');
@@ -449,22 +485,42 @@ $('upload').onchange = async (e) => {
   } catch (err) { log(`Upload failed: ${err.message}`); }
   e.target.value = '';
 };
+let saving = null;
 async function save() {
-  if (!sceneData) return;
-  try { await api(`/api/runs/${runId}/scene`, { method: 'PUT', body: JSON.stringify(sceneData), headers: { 'Content-Type': 'application/json' } }); setDirty(false); log('Saved.'); }
-  catch (e) { log(`Save failed: ${e.message}`); }
+  if (!sceneData || !sceneRun) return true;
+  if (sceneRun !== runId) { log('Save skipped: the loaded scene belongs to another run.'); return false; }
+  if (saving) return saving;  // one save at a time; callers share its outcome
+  const id = sceneRun, rev = revision, body = JSON.stringify(sceneData);
+  saving = (async () => {
+    try {
+      await api(`/api/runs/${id}/scene`, { method: 'PUT', body, headers: { 'Content-Type': 'application/json', 'If-Match': sceneEtag || '' } });
+      if (id !== sceneRun) return false;
+      sceneEtag = api.etag;
+      if (revision === rev) setDirty(false);  // edits made during the save stay unsaved
+      log('Saved.');
+      return true;
+    } catch (e) {
+      log(e.status === 412 ? 'Save rejected: the scene changed on the server since you loaded it. Reload to get it (your unsaved edits will be lost).'
+        : e.status === 409 ? 'Save rejected: this run is being rebuilt or verified. Try again when it finishes.' : `Save failed: ${e.message}`);
+      if (e.status === 412) $('btn-reload').hidden = false;
+      return false;
+    } finally { saving = null; }
+  })();
+  return saving;
 }
 $('btn-save').onclick = save;
 $('btn-verify').onclick = async () => {
   if (!sceneData) return;
-  if (dirty) await save();
+  if (dirty && !(await save())) return log('Verify cancelled: your changes are not saved.');
+  const id = runId;
   $('verify-summary').textContent = 'Rendering every keyframe…';
-  try { showVerify(await api(`/api/runs/${runId}/verify`, { method: 'POST' })); } catch (e) { $('verify-summary').textContent = `Verify failed: ${e.message}`; }
+  try { const v = await api(`/api/runs/${id}/verify`, { method: 'POST' }); if (id === runId) showVerify(v); }
+  catch (e) { if (id === runId) $('verify-summary').textContent = `Verify failed: ${e.message}`; }
 };
 $('btn-rebuild').onclick = async () => {
   if (!runId) return;
-  if (dirty) await save();
-  try { await api(`/api/runs/${runId}/rebuild`, { method: 'POST' }); loadedSceneFor = null; pollTimer = 1; poll(); } catch (e) { log(`Rebuild: ${e.message}`); }
+  if (dirty && !(await save())) return log('Rebuild cancelled: your changes are not saved.');
+  try { await api(`/api/runs/${runId}/rebuild`, { method: 'POST' }); poll(); } catch (e) { log(`Rebuild: ${e.message}`); }
 };
 function showVerify(v) {
   const sum = $('verify-summary');
@@ -482,8 +538,15 @@ function showVerify(v) {
 }
 $('btn-glb').onclick = () => {
   if (!sceneData) return;
-  new GLTFExporter().parse(objGroup, (res) => {
-    const a = el('a', { href: URL.createObjectURL(new Blob([res], { type: 'model/gltf-binary' })), download: `${runId}.glb` });
+  // Export in metres: bake the calibration into each mesh rather than relying on a scaled parent node.
+  const k = mpu(), out = new THREE.Group();
+  for (const m of objGroup.children) {
+    const c = m.clone();
+    c.position.multiplyScalar(k); c.scale.multiplyScalar(k); c.name = objById(m.userData.id)?.name || '';
+    out.add(c);
+  }
+  new GLTFExporter().parse(out, (res) => {
+    const a = el('a', { href: URL.createObjectURL(new Blob([res], { type: 'model/gltf-binary' })), download: `${sceneRun}.glb` });
     a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   }, (err) => log(`glTF export failed: ${err.message || err}`), { binary: true });
 };

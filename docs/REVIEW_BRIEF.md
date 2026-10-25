@@ -123,3 +123,34 @@ Run folder layout (`runs/<id>/`, gitignored):
 - Managed Agents (Antigravity) for the zone agents. They currently run in a local thread pool.
 - In-editor physics ("drop a ball").
 - Push and PR: no remote exists yet.
+
+## 9. Fixes after the first review (Codex, on `c46f383`)
+
+Each item below has a regression test in `tests/test_review_fixes.py` unless noted. Suite: 24 passed.
+
+| Finding | Fix |
+|---|---|
+| P1: editor switching runs could save one run's scene into another | Every async result is tagged with its run and dropped if stale; saves go only to `sceneRun` (the run the scene was loaded from). Editor, checked in browser. |
+| P1: generated objects never appeared after the pipeline finished | Status now carries `scene_etag`; the editor reloads when it changes, or shows "Reload scene" if you have unsaved edits. |
+| P1: saving during reconstruction lost edits | `PUT /scene` and `POST /verify` return 409 while the run is busy. Saves require `If-Match` with the scene ETag (412 on mismatch). |
+| P1: a ceiling could be taken as the floor | A floor candidate must have at least 80% of cameras above it. The fallback ground is taken from points below the cameras. |
+| Keyframes crossed second boundaries at 29.97 fps | Second boundaries are computed as `ceil(sec * fps)`. |
+| Initialization skipped the displacement check on its last candidate | The check is now always applied, with a clear error if no pair qualifies. |
+| No unique ids, unit quaternions or finite calibration | Pydantic validators added. |
+| Non-uniform spheres and cylinders shown differently than exported and scored | Cylinders are forced round (x = z) and spheres uniform, in both the contract and the editor's scaling. |
+| One max-size renderer distorted mixed aspect ratios | One MuJoCo renderer per camera resolution; the test checks projected pixel positions. |
+| Upload returned a URI on FAILED or timeout | Raises `RuntimeError` / `TimeoutError`. |
+| Blank `.env` values inherited shell credentials | A blank value unsets the variable. |
+| "Visible" points included occluded ones | Coarse depth buffer (16 px cells, 5% slack). |
+| Zone id collisions ("Living Room" vs "living-room") | Slug plus a hash of the exact zone name, and scene-wide de-duplication. |
+| Rebuild replaced user-edited Gemini objects | Editing a Gemini object makes it `source: manual`, so rebuilds keep it. |
+| Rebuild reset measured calibration | Kept objects and a measured calibration are mapped into the new frame via a similarity fit on shared keyframe cameras. |
+| Same-filename uploads in one second collided | Run ids get 24 random bits. |
+| Verify/Rebuild continued after a failed save; dirty flag cleared too early | `save()` returns success; Verify and Rebuild stop on failure. The dirty flag clears only if nothing was edited during the save. |
+| glTF and MJCF exports ignored calibration | Both export in metres (`meters_per_unit` baked in). |
+| Polling stopped on one error; status writes not atomic | Polling retries with backoff. `status.json`, `scene.json`, `points.json`, `keyframes.json` and `verify.json` are written via temp file + rename. |
+| Measurement state leaked across runs | Reset on run switch. |
+| Docs overclaimed "any video gives an exact replica"; the path test implied absolute accuracy | README and SPEC now state the real scope and that the path test is shape-only. |
+
+Still open by design: no bundle adjustment, variable-frame-rate timing treated as constant-rate, fit to points is a
+heuristic, builders get at most 12 keyframes per zone.

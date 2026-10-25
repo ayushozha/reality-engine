@@ -169,12 +169,18 @@ def test_server_routes_and_guards(http):
     code, body = _req(f"{http}/api/runs")
     assert code == 200 and json.loads(body)[0]["id"] == "demo-1"
     assert _req(f"{http}/")[0] == 200
-    code, body = _req(f"{http}/api/runs/demo-1/scene")
-    scene = json.loads(body)
+    with urllib.request.urlopen(f"{http}/api/runs/demo-1/scene") as r:
+        scene, etag = json.loads(r.read()), r.headers["ETag"]
     scene["objects"] = [dict(id="x", name="Desk", kind="box", size=[1, 0.8, 0.6], position=[0, 0.4, 0])]
-    assert _req(f"{http}/api/runs/demo-1/scene", "PUT", json.dumps(scene).encode())[0] == 200
+    put = lambda body, tag: urllib.request.urlopen(urllib.request.Request(
+        f"{http}/api/runs/demo-1/scene", data=json.dumps(body).encode(), method="PUT", headers={"If-Match": tag}))
+    with put(scene, etag) as r:
+        assert r.status == 200
+        etag = r.headers["ETag"]
     scene["objects"][0]["size"] = [-1, 1, 1]
-    assert _req(f"{http}/api/runs/demo-1/scene", "PUT", json.dumps(scene).encode())[0] == 400
+    with pytest.raises(urllib.error.HTTPError) as e:
+        put(scene, etag)
+    assert e.value.code == 400
     assert _req(f"{http}/runs/demo-1/..%2F..%2Fpyproject.toml")[0] == 404
     assert _req(f"{http}/runs/demo-1/../../../pyproject.toml")[0] == 404
     assert _req(f"{http}/api/runs/..%2Fx/scene")[0] == 404

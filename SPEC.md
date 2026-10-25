@@ -1,6 +1,6 @@
 # Reality Engine — Spec
 
-> **Film any space. Get a measured, editable, simulatable replica.**
+> **Film a space. Get a measured, editable, simulatable replica.**
 
 Gemini 4 Argon SF Hackathon · Track 2 (More Dimensions) · 2026-10-25
 
@@ -50,10 +50,16 @@ FOV. Every write through the server is validated.
 - **Points on a surface**: fraction of reconstructed points within 1% of the scene extent of a replica surface
   or the floor. Geometric, independent of rendering.
 - **Mean SSIM / edge F1**: replica render vs real keyframe, from the exact keyframe camera.
-- **Camera path accuracy** (tests, synthetic ground truth): 8 mm mean error over a 3.1 m path.
+- **Camera path accuracy** (tests, synthetic ground truth): 8 mm mean error over a 3.1 m path after a similarity fit
+  (shape accuracy). Absolute scale comes from the 1.5 m camera-height prior until calibrated; on the test room it
+  was 4.7% off.
 
 ## Known limits
 
+- Not every video works: reconstruction needs overlapping views and sideways camera motion in the first keyframes.
+- Objects are four primitive kinds (box, round cylinder, sphere, plane), so the replica is structured, not photoreal.
+- Keyframe timing uses the container's declared frame rate; variable-frame-rate phone videos are treated as constant.
+- Rebuilding maps kept objects and a measured calibration into the new reconstruction via shared keyframe cameras.
 - No bundle adjustment: drift grows on long paths. COLMAP would be better but its native library is blocked
   by this machine's Windows Application Control policy.
 - Focal length is assumed from a 65° horizontal FOV (`--hfov` to override).

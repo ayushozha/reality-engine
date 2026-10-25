@@ -21,6 +21,16 @@ def euler_xyz(deg) -> np.ndarray:
     return Rx @ Ry @ Rz
 
 
+def matrix_to_euler_xyz(R) -> tuple[float, float, float]:
+    """Inverse of euler_xyz: R = Rx @ Ry @ Rz -> (x, y, z) degrees."""
+    y = math.asin(max(-1.0, min(1.0, R[0, 2])))
+    if abs(R[0, 2]) < 1 - 1e-9:
+        x, z = math.atan2(-R[1, 2], R[2, 2]), math.atan2(-R[0, 1], R[0, 0])
+    else:  # gimbal lock: fold all of the remaining rotation into x
+        x, z = math.atan2(R[2, 1], R[1, 1]), 0.0
+    return tuple(math.degrees(v) for v in (x, y, z))
+
+
 def quat_matrix(q) -> np.ndarray:
     x, y, z, w = q
     return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
@@ -44,7 +54,8 @@ def _f(*v) -> str:
     return " ".join(f"{x:.6g}" for x in v)
 
 
-def compile_mjcf(scene: Scene, dynamic: bool = False, offscreen=(1600, 1200)) -> str:
+def compile_mjcf(scene: Scene, dynamic: bool = False, offscreen=(1600, 1200), scale: float = 1.0) -> str:
+    """scale multiplies every length: pass calibration.meters_per_unit to export in metres."""
     root = ET.Element("mujoco", model="reality_engine")
     ET.SubElement(root, "option", timestep="0.002", integrator="implicitfast")
     vis = ET.SubElement(root, "visual")
@@ -58,8 +69,8 @@ def compile_mjcf(scene: Scene, dynamic: bool = False, offscreen=(1600, 1200)) ->
     cyl_fix = euler_xyz((-90, 0, 0))  # maps MuJoCo's cylinder axis (local Z) onto ours (local Y)
     for o in scene.objects:
         R = C @ euler_xyz(o.rotation)  # object-local axes -> Z-up world, so half-sizes stay per local axis
-        pos = C @ np.array(o.position)
-        sx, sy, sz = o.size
+        pos = C @ np.array(o.position) * scale
+        sx, sy, sz = (v * scale for v in o.size)
         if o.kind in ("box", "plane"):
             gtype, size, Rg = "box", _f(sx / 2, max(sy, 1e-3) / 2, sz / 2), R
         elif o.kind == "cylinder":
@@ -75,7 +86,7 @@ def compile_mjcf(scene: Scene, dynamic: bool = False, offscreen=(1600, 1200)) ->
             ET.SubElement(world, "geom", pos=_f(*pos), quat=_mj_quat(Rg), **attrs)
     for cam in scene.cameras:
         R = C @ quat_matrix(cam.quaternion)  # columns: camera x, y, z axes (looks along -z) in Z-up world
-        ET.SubElement(world, "camera", name=f"cam_{cam.id}", pos=_f(*(C @ np.array(cam.position))),
+        ET.SubElement(world, "camera", name=f"cam_{cam.id}", pos=_f(*(C @ np.array(cam.position) * scale)),
                       xyaxes=_f(*R[:, 0], *R[:, 1]), fovy=_f(cam.fov_y))
     ET.indent(root)
     return ET.tostring(root, encoding="unicode")

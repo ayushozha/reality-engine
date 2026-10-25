@@ -12,7 +12,7 @@ import mujoco
 import numpy as np
 
 from .mjcf import compile_mjcf, euler_xyz
-from .scene import Scene
+from .scene import Scene, write_atomic
 
 CMP_W = 480
 
@@ -69,15 +69,19 @@ def run(scene: Scene, run_dir: Path, xyz: np.ndarray | None = None) -> dict:
     model = mujoco.MjModel.from_xml_string(compile_mjcf(scene, offscreen=(w, h)))
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
-    renderer = mujoco.Renderer(model, height=h, width=w)
+    renderers = {}  # one per camera resolution, so each render has that camera's own aspect ratio
     per = []
     for cam in scene.cameras:
         real = cv2.imread(str(run_dir / cam.image))
         if real is None:
             continue
-        renderer.update_scene(data, camera=f"cam_{cam.id}")
-        img = cv2.cvtColor(renderer.render(), cv2.COLOR_RGB2BGR)
-        img = cv2.resize(img, (real.shape[1], real.shape[0]))
+        r = renderers.get((cam.width, cam.height))
+        if r is None:
+            r = renderers[(cam.width, cam.height)] = mujoco.Renderer(model, height=cam.height, width=cam.width)
+        r.update_scene(data, camera=f"cam_{cam.id}")
+        img = cv2.cvtColor(r.render(), cv2.COLOR_RGB2BGR)
+        if img.shape[:2] != real.shape[:2]:
+            img = cv2.resize(img, (real.shape[1], real.shape[0]))  # same aspect, only the stored image differs
         cv2.imwrite(str(out / f"{cam.id}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 88])
         size = (CMP_W, round(real.shape[0] * CMP_W / real.shape[1]))
         ga = cv2.cvtColor(cv2.resize(real, size), cv2.COLOR_BGR2GRAY)
@@ -85,7 +89,8 @@ def run(scene: Scene, run_dir: Path, xyz: np.ndarray | None = None) -> dict:
         cv2.imwrite(str(out / f"{cam.id}_compare.jpg"), np.hstack([cv2.resize(real, size), cv2.resize(img, size)]))
         per.append({"camera": cam.id, "t": cam.t, "ssim": round(ssim(ga, gb), 4), "edge_f1": round(edge_f1(ga, gb), 4),
                     "render": f"renders/{cam.id}.jpg", "compare": f"renders/{cam.id}_compare.jpg"})
-    renderer.close()
+    for r in renderers.values():
+        r.close()
     result = {"keyframes": per,
               "mean_ssim": round(float(np.mean([p["ssim"] for p in per])), 4) if per else None,
               "mean_edge_f1": round(float(np.mean([p["edge_f1"] for p in per])), 4) if per else None,
@@ -95,7 +100,7 @@ def run(scene: Scene, run_dir: Path, xyz: np.ndarray | None = None) -> dict:
         tau = 0.01 * extent
         frac, _ = points_explained(scene, xyz, tau)
         result.update(points_explained=round(frac, 4), tolerance=round(tau, 4))
-    (run_dir / "verify.json").write_text(json.dumps(result, indent=2))
+    write_atomic(run_dir / "verify.json", json.dumps(result, indent=2))
     return result
 
 

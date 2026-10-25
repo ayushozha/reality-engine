@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import threading
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Vec3 = tuple[float, float, float]
 
@@ -43,8 +45,17 @@ class Camera(Strict):
     width: int = Field(gt=0, le=16384)
     height: int = Field(gt=0, le=16384)
 
-    _p = field_validator("position", "quaternion")(lambda v: _finite(v))
+    _p = field_validator("position")(lambda v: _finite(v))
     _i = field_validator("image")(lambda v: _relpath(v))
+
+    @field_validator("quaternion")
+    @classmethod
+    def _unit(cls, q):
+        _finite(q)
+        n = math.sqrt(sum(x * x for x in q))
+        if not 0.9 < n < 1.1:
+            raise ValueError("quaternion must be (close to) unit length")
+        return tuple(x / n for x in q)
 
 
 class Object3D(Strict):
@@ -71,6 +82,18 @@ class Object3D(Strict):
             raise ValueError("each size must be in (0, 10000]")
         return v
 
+    @model_validator(mode="after")
+    def _shape(self):
+        # Only shapes every consumer can represent: round cylinders (x = z diameter) and true spheres.
+        # The editor applies the same rule while scaling, so what you see is what MuJoCo and scoring use.
+        x, y, z = self.size
+        if self.kind == "cylinder" and x != z:
+            self.size = (max(x, z), y, max(x, z))
+        elif self.kind == "sphere" and not x == y == z:
+            m = max(x, y, z)
+            self.size = (m, m, m)
+        return self
+
 
 class Floor(Strict):
     detected: bool = False
@@ -79,7 +102,7 @@ class Floor(Strict):
 
 
 class Calibration(Strict):
-    meters_per_unit: float = Field(default=1.0, gt=0)
+    meters_per_unit: float = Field(default=1.0, gt=0, lt=1e6, allow_inf_nan=False)
     method: Literal["camera_height_prior", "measured", "none"] = "none"
     note: str = Field(default="", max_length=200)
 
@@ -95,13 +118,29 @@ class Scene(Strict):
 
     _pts = field_validator("points")(lambda v: _relpath(v))
 
+    @model_validator(mode="after")
+    def _unique_ids(self):
+        for label, ids in (("object", [o.id for o in self.objects]), ("camera", [c.id for c in self.cameras])):
+            dup = {i for i in ids if ids.count(i) > 1} if len(ids) != len(set(ids)) else set()
+            if dup:
+                raise ValueError(f"duplicate {label} ids: {sorted(dup)[:5]}")
+        return self
+
 
 def load(path: Path) -> Scene:
     return Scene.model_validate_json(Path(path).read_text(encoding="utf-8"))
 
 
+def write_atomic(path: Path, text: str) -> None:
+    """Write via a temp file + rename so readers never see a half-written file."""
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def save(scene: Scene, path: Path) -> None:
-    Path(path).write_text(scene.model_dump_json(indent=2), encoding="utf-8")
+    write_atomic(path, scene.model_dump_json(indent=2))
 
 
 def object_schema() -> dict:

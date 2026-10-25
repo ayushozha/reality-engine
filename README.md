@@ -1,6 +1,10 @@
 # Reality Engine
 
-**Film any space. Get a measured, editable, simulatable replica.**
+**Film a space. Get a measured, editable, simulatable replica.**
+
+The camera path and point cloud are measured from the video; objects are boxes, cylinders, spheres and planes
+placed against those measurements (by you in the editor, or by Gemini agents). It is a structured replica, not a
+photoreal or millimetre-exact copy, and it needs footage with overlap and sideways camera motion.
 
 ![status](https://img.shields.io/badge/status-hackathon%20prototype-orange)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
@@ -29,7 +33,7 @@ Built at the Gemini 4 Argon SF Hackathon (2026-10-25). Everything in this reposi
 | MJCF export, glTF export | Implemented; MJCF tested |
 | Local server (upload, pipeline, save, verify, export) | Implemented, tested |
 | CAD editor | Implemented, checked in a browser |
-| Gemini read / parallel zone agents / critique | Implemented against the installed SDK; **not run yet** (no API key in this environment) |
+| Gemini read / parallel zone agents / critique | Implemented; one live API call verified, full stages exercised with mocks |
 | Managed Agents for zone agents, bundle adjustment | Roadmap |
 
 See [SPEC.md](SPEC.md) for the full design.
@@ -127,7 +131,8 @@ uv run pytest -q
 ```
 
 The tests render a textured room with MuJoCo from a known camera path, then check: blurred frames are never
-chosen; the recovered camera path is within 3 cm of ground truth (measured: 8 mm mean); the floor is found;
+chosen; the recovered camera path is within 3 cm of ground truth after a similarity fit (measured: 8 mm mean; this
+checks shape, not absolute scale, which comes from the camera-height prior); the floor is found;
 Gemini stages are skipped without a key; scene validation rejects bad input; MJCF axes and rotations are
 correct; placing the true table raises both points-on-surface and edge F1; the server rejects invalid scenes
 and path traversal.

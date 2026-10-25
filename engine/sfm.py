@@ -14,10 +14,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .scene import write_atomic
+
 MAX_DIM = 1280
 RATIO = 0.75
 REPROJ_PX = 4.0
 MIN_PARALLAX_DEG = 1.0
+MIN_INIT_SHIFT = 0.02  # median feature shift, as a fraction of image width, required to initialize
+CAMS_ABOVE_FLOOR = 0.8  # share of cameras that must sit above a plane for it to count as the floor
 CAMERA_HEIGHT_M = 1.5
 
 
@@ -97,8 +101,8 @@ def reconstruct(images: list[Path], hfov_deg: float = 65.0, log=print) -> dict:
         if len(m) < 60:
             continue
         p0, pj = frames[0].pts[m[:, 0]], frames[j].pts[m[:, 1]]
-        if np.median(np.linalg.norm(p0 - pj, axis=1)) < 0.02 * frames[0].w and j < min(len(frames), 12) - 1:
-            continue
+        if np.median(np.linalg.norm(p0 - pj, axis=1)) < MIN_INIT_SHIFT * frames[0].w:
+            continue  # too little camera motion for a reliable baseline
         E, mask = cv2.findEssentialMat(p0, pj, K, cv2.RANSAC, 0.999, 1.0)
         if E is None or E.shape != (3, 3):
             continue
@@ -107,7 +111,7 @@ def reconstruct(images: list[Path], hfov_deg: float = 65.0, log=print) -> dict:
             init = (j, R, t, m[mask.ravel() > 0])
             break
     if init is None:
-        raise RuntimeError("could not initialize: not enough overlap or parallax in the first keyframes")
+        raise RuntimeError("could not initialize: the first 12 keyframes lack overlap or camera motion; move the camera more slowly and sideways")
     j, R, t, m = init
     frames[0].R, frames[0].t = np.eye(3), np.zeros((3, 1))
     frames[j].R, frames[j].t = R, t
@@ -169,8 +173,12 @@ def _rot_between(a, b):
     return np.eye(3) + vx + vx @ vx * (1 / (1 + c))
 
 
-def fit_floor(xyz, up_guess, iters=600, seed=0):
-    """RANSAC plane roughly perpendicular to the camera's up direction. Returns (normal, d, inlier_ratio)."""
+def fit_floor(xyz, up_guess, centers=None, iters=600, seed=0):
+    """RANSAC floor: a plane roughly perpendicular to camera-up with (nearly) every camera above it.
+
+    The camera-above test is what separates a floor from a ceiling or a tabletop seen from below.
+    Returns (normal, d, inlier_ratio); normal is None when no plane qualifies.
+    """
     rng = np.random.default_rng(seed)
     extent = np.linalg.norm(np.percentile(xyz, 95, 0) - np.percentile(xyz, 5, 0)) or 1.0
     thresh, best = 0.01 * extent, (None, None, 0)
@@ -184,6 +192,8 @@ def fit_floor(xyz, up_guess, iters=600, seed=0):
             continue
         n = n if n @ up_guess > 0 else -n
         d = -n @ p[0]
+        if centers is not None and np.mean(centers @ n + d > thresh) < CAMS_ABOVE_FLOOR:
+            continue
         inl = int((np.abs(xyz @ n + d) < thresh).sum())
         if inl > best[2]:
             best = (n, d, inl)
@@ -196,10 +206,13 @@ def align(rec: dict) -> dict:
     centers = {i: (-R.T @ t).ravel() for i, (R, t) in cams.items()}
     up = np.mean([-R[1] for R, _ in cams.values()], 0)  # camera -y (image up) in world
     up /= np.linalg.norm(up)
-    n, d, ratio = fit_floor(xyz, up) if len(xyz) >= 50 else (None, None, 0)
+    cpos = np.array(list(centers.values()))
+    n, d, ratio = fit_floor(xyz, up, cpos) if len(xyz) >= 50 else (None, None, 0)
     detected = n is not None and ratio >= 0.05
     if not detected:
-        n, d = up, -np.percentile(xyz @ up, 3)
+        # No floor found: put the ground just below the lowest 3% of points that are under the cameras.
+        below = (xyz @ up)[(xyz @ up) < np.min(cpos @ up)]
+        n, d = up, -(np.percentile(below, 3) if len(below) else np.min(cpos @ up) - CAMERA_HEIGHT_M)
     A = _rot_between(n, np.array([0.0, 1.0, 0.0]))
     first = min(cams)
     fwd = A @ cams[first][0][2]  # camera +z (forward) in world, after leveling
@@ -243,5 +256,5 @@ def write_points(path: Path, xyz, rgb, limit=80000, seed=0):
     if len(xyz) > limit:
         idx = np.random.default_rng(seed).choice(len(xyz), limit, replace=False)
         xyz, rgb = xyz[idx], rgb[idx]
-    path.write_text(json.dumps({"count": len(xyz), "positions": np.round(xyz, 4).ravel().tolist(),
-                                "colors": rgb.astype(int).ravel().tolist()}))
+    write_atomic(path, json.dumps({"count": len(xyz), "positions": np.round(xyz, 4).ravel().tolist(),
+                                   "colors": rgb.astype(int).ravel().tolist()}))

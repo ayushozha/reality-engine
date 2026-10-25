@@ -21,8 +21,11 @@ def load_env(path=ROOT / ".env"):
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                if v.strip():
-                    os.environ[k.strip()] = v.strip().strip('"').strip("'")
+                k, v = k.strip(), v.strip().strip('"').strip("'")
+                if v:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)  # a blank entry in .env means "unset", not "inherit from the shell"
 
 
 def configured() -> bool:
@@ -54,8 +57,15 @@ def text(s):
     return {"type": "text", "text": s}
 
 
-def image(path):
-    return {"type": "image", "mime_type": "image/jpeg", "data": base64.b64encode(Path(path).read_bytes()).decode()}
+INLINE_VIDEO_MAX = 15 * 1024 ** 2
+
+
+def video_part(path):
+    """Small clips go inline; anything larger goes through the Files API."""
+    data = Path(path).read_bytes()
+    if len(data) <= INLINE_VIDEO_MAX:
+        return {"type": "video", "mime_type": "video/mp4", "data": base64.b64encode(data).decode()}
+    return upload_video(path)
 
 
 def upload_video(path, timeout_s=900):
@@ -63,9 +73,14 @@ def upload_video(path, timeout_s=900):
     c = client()
     f = c.files.upload(file=str(path))
     deadline = time.time() + timeout_s
-    while getattr(f.state, "name", str(f.state)) == "PROCESSING" and time.time() < deadline:
+    state = lambda: str(getattr(f.state, "name", f.state)).upper()
+    while "PROCESSING" in state():
+        if time.time() > deadline:
+            raise TimeoutError(f"video {f.name} still processing after {timeout_s} s")
         time.sleep(5)
         f = c.files.get(name=f.name)
+    if "ACTIVE" not in state():
+        raise RuntimeError(f"video upload {f.name} ended in state {state()}")
     return {"type": "video", "mime_type": f.mime_type or "video/mp4", "uri": f.uri}
 
 

@@ -4,11 +4,13 @@ All three need GEMINI_API_KEY; without it they raise llm.NotConfigured and the p
 as skipped. Geometry (cameras, points, floor) always comes from measurement, never from the model:
 agents place objects inside that measured frame and are given the points each keyframe actually sees.
 """
+import hashlib
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from . import llm
@@ -67,8 +69,12 @@ def read_video(run_dir: Path, video: Path) -> tuple[dict, str]:
     return reading, rid
 
 
-def visible_points(scene: Scene, cam, xyz: np.ndarray, limit=1500) -> list:
-    """Reconstructed points inside this camera's view, so the agent can anchor positions to measurement."""
+def visible_points(scene: Scene, cam, xyz: np.ndarray, limit=1500, cell_px=16, depth_slack=0.05) -> list:
+    """Reconstructed points this camera actually sees, so the agent can anchor positions to measurement.
+
+    Frustum test, then a coarse depth buffer: in each cell_px x cell_px image cell only points within
+    depth_slack (5%) of the nearest point survive, which drops points hidden behind nearer surfaces.
+    """
     if not len(xyz):
         return []
     R = quat_matrix(cam.quaternion)
@@ -77,6 +83,12 @@ def visible_points(scene: Scene, cam, xyz: np.ndarray, limit=1500) -> list:
     f = 0.5 * cam.height / np.tan(np.radians(cam.fov_y) / 2)
     u, v = pc[:, 0] / np.maximum(z, 1e-6) * f + cam.width / 2, -pc[:, 1] / np.maximum(z, 1e-6) * f + cam.height / 2
     sel = np.where((z > 0) & (u >= 0) & (u < cam.width) & (v >= 0) & (v < cam.height))[0]
+    if len(sel):
+        cell = (v[sel] // cell_px).astype(np.int64) * 100000 + (u[sel] // cell_px).astype(np.int64)
+        nearest = {}
+        for c, d in zip(cell, z[sel]):
+            nearest[c] = min(d, nearest.get(c, np.inf))
+        sel = sel[np.array([d <= nearest[c] * (1 + depth_slack) for c, d in zip(cell, z[sel])])]
     if len(sel) > limit:
         sel = np.random.default_rng(0).choice(sel, limit, replace=False)
     return np.round(xyz[sel], 3).tolist()
@@ -96,17 +108,42 @@ def build_zone(run_dir: Path, scene: Scene, xyz, zone: dict, reading_id: str) ->
                       f"{zone['description']}\nBelow are its most stable keyframes, one per second, each with its "
                       "measured camera pose and the 3D points that camera sees. Reason second by second about what "
                       "is visible (per_second), then return every object in this zone.")]
-    for c in cams:
-        parts.append(llm.text(json.dumps({"keyframe_t": c.t, "camera": {"position": c.position, "quaternion_xyzw": c.quaternion,
-                                                                       "fov_y_deg": c.fov_y}, "points_xyz": visible_points(scene, c, xyz)})))
-        parts.append(llm.image(run_dir / c.image))
+    if not cams:
+        return {"zone": zone["name"], "interaction_id": reading_id, "per_second": [], "objects": []}
+    clip = stills_video([run_dir / c.image for c in cams], run_dir / "agents" / f"{_slug(zone['name'])}_keyframes.mp4")
+    manifest = [{"clip_second": i, "keyframe_t": c.t, "camera": {"position": c.position, "quaternion_xyzw": c.quaternion,
+                 "fov_y_deg": c.fov_y}, "points_xyz": visible_points(scene, c, xyz)} for i, c in enumerate(cams)]
+    parts += [llm.text("The clip below shows one stable keyframe per second; clip second i is manifest entry i:\n"
+                       + json.dumps(manifest)), llm.video_part(clip)]
     out, iid = llm.ask(parts, ZONE_SCHEMA, previous_id=reading_id, kind="agent")
     return {"zone": zone["name"], "interaction_id": iid, **out}
 
 
+def _slug(zone_name: str) -> str:
+    """Readable slug plus a hash of the exact zone name: "Living Room" and "living-room" never collide."""
+    base = re.sub(r"[^a-z0-9]+", "-", zone_name.lower()).strip("-")[:20] or "zone"
+    return f"{base}-{hashlib.sha256(zone_name.encode()).hexdigest()[:6]}"
+
+
+def stills_video(images: list[Path], out: Path, max_w: int = 1280) -> Path:
+    """Hold each still for one second in an mp4. This key has image input disabled; video input works,
+    and one frame per second is exactly the per-second keyframe sequence the agents reason over."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    frames = [cv2.imread(str(p)) for p in images]
+    frames = [f for f in frames if f is not None]
+    h0, w0 = frames[0].shape[:2]
+    s = min(1.0, max_w / w0)
+    size = (round(w0 * s) // 2 * 2, round(h0 * s) // 2 * 2)
+    w = cv2.VideoWriter(str(out), cv2.VideoWriter_fourcc(*"mp4v"), 1, size)
+    for f in frames:
+        w.write(cv2.resize(f, size, interpolation=cv2.INTER_AREA))
+    w.release()
+    return out
+
+
 def _to_objects(zone_name: str, raw: list) -> list[Object3D]:
     objs = []
-    slug = re.sub(r"[^a-z0-9]+", "-", zone_name.lower()).strip("-")[:24] or "zone"
+    slug = _slug(zone_name)
     for i, o in enumerate(raw):
         try:
             objs.append(Object3D(id=f"{slug}-{i + 1}", zone=zone_name, source="gemini",
@@ -114,6 +151,18 @@ def _to_objects(zone_name: str, raw: list) -> list[Object3D]:
         except Exception:
             continue  # an invalid object is dropped, never half-applied
     return objs
+
+
+def _unique(objs: list[Object3D]) -> list[Object3D]:
+    """Keep ids unique across the whole scene (manual objects keep theirs; later clashes get a suffix)."""
+    seen, out = set(), []
+    for o in objs:
+        oid, k = o.id, 2
+        while oid in seen:
+            oid, k = f"{o.id[:58]}-{k}", k + 1
+        seen.add(oid)
+        out.append(o if oid == o.id else o.model_copy(update={"id": oid}))
+    return out
 
 
 def build_world(run_dir: Path, scene: Scene, xyz, workers: int = 8) -> Scene:
@@ -125,7 +174,7 @@ def build_world(run_dir: Path, scene: Scene, xyz, workers: int = 8) -> Scene:
     objs = [o for o in scene.objects if o.source != "gemini"]
     for r in results:
         objs += _to_objects(r["zone"], r["objects"])
-    return scene.model_copy(update={"objects": objs})
+    return scene.model_copy(update={"objects": _unique(objs)})
 
 
 def critique(run_dir: Path, scene: Scene, verify: dict) -> Scene:
@@ -140,13 +189,15 @@ def critique(run_dir: Path, scene: Scene, verify: dict) -> Scene:
             return None
         cams = _zone_cameras(scene, zone, max_frames=8)
         mine = [o.model_dump() for o in scene.objects if o.zone == zone["name"]]
-        parts = [llm.text(CONVENTIONS + f"\nEach image is REAL (left) | your REPLICA (right) for zone '{zone['name']}'. "
-                          f"Fix every difference in position, size, rotation, color and missing or extra objects. "
-                          f"Current objects: {json.dumps(mine)}")]
-        for c in cams:
-            s = scores.get(c.id)
-            if s:
-                parts += [llm.text(f"t={c.t}s ssim={s['ssim']} edge_f1={s['edge_f1']}"), llm.image(run_dir / s["compare"])]
+        shown = [(c, scores[c.id]) for c in cams if c.id in scores]
+        if not shown:
+            return None
+        clip = stills_video([run_dir / s["compare"] for _, s in shown], run_dir / "agents" / f"{_slug(zone['name'])}_compare.mp4")
+        per = [{"clip_second": i, "keyframe_t": c.t, "ssim": s["ssim"], "edge_f1": s["edge_f1"]} for i, (c, s) in enumerate(shown)]
+        parts = [llm.text(CONVENTIONS + f"\nEach second of the clip is REAL (left) | your REPLICA (right) for zone "
+                          f"'{zone['name']}'. Fix every difference in position, size, rotation, color and missing or "
+                          f"extra objects.\nPer second: {json.dumps(per)}\nCurrent objects: {json.dumps(mine)}"),
+                 llm.video_part(clip)]
         out, iid = llm.ask(parts, ZONE_SCHEMA, previous_id=a["interaction_id"], kind="agent")
         a["interaction_id"] = iid
         return zone["name"], out["objects"]
@@ -158,4 +209,4 @@ def critique(run_dir: Path, scene: Scene, verify: dict) -> Scene:
     objs = [o for o in scene.objects if o.source != "gemini" or o.zone not in revised]
     for z, raw in results:
         objs += _to_objects(z, raw)
-    return scene.model_copy(update={"objects": objs})
+    return scene.model_copy(update={"objects": _unique(objs)})

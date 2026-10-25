@@ -1,135 +1,124 @@
-# Reality Compiler
+# Reality Engine
 
-**Film it. Get a calibrated simulation your robot can train in.**
+**Film any space. Get a measured, editable, simulatable replica.**
 
 ![status](https://img.shields.io/badge/status-hackathon%20prototype-orange)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
-![sim](https://img.shields.io/badge/sim-MuJoCo-2440d8)
-![model](https://img.shields.io/badge/model-Gemini%204%20Argon-4285F4)
+![geometry](https://img.shields.io/badge/geometry-OpenCV%20SfM-5C3EE8)
+![editor](https://img.shields.io/badge/editor-three.js%200.186-black)
+![sim](https://img.shields.io/badge/export-glTF%20%7C%20MuJoCo-2440d8)
 ![license](https://img.shields.io/badge/license-none%20yet-lightgrey)
 
-`video → scene graph → MJCF → MuJoCo → side-by-side critique → fix → repeat`
+`video → stable keyframe per second → camera path + 3D points → parallel Gemini zone agents → CAD editor → verify`
 
-Built at the Gemini 4 Argon SF Hackathon (2026-10-25), Track 2: More Dimensions. Everything in this
-repository was written during the event.
+Built at the Gemini 4 Argon SF Hackathon (2026-10-25). Everything in this repository was written during the event.
 
 ## Contents
-- [What it does](#what-it-does)
-- [Status](#status)
-- [Quick start](#quick-start)
-- [Configuration](#configuration)
-- [CLI](#cli)
-- [Architecture](#architecture)
-- [Repository map](#repository-map)
-- [Testing](#testing)
-- [Privacy and cost](#privacy-and-cost)
-- [Contributing](#contributing)
-- [License](#license)
-
-## What it does
-
-Robotics teams lose performance moving from simulation to real hardware because the sim doesn't match reality.
-Reality Compiler closes that gap for tabletop rigid-body scenes:
-
-1. You film a physics event (dominoes toppling) with a sheet of US-letter paper in frame for scale.
-2. Gemini 4 Argon watches the video and returns a scene graph plus a timestamped timeline of real events.
-3. The scene compiles to MJCF and runs in MuJoCo, rendered from the estimated camera.
-4. Argon watches REAL and SIM side by side, critiques the mismatch and returns a revised scene.
-5. The critic keeps every earlier round in one chained interaction (`previous_interaction_id`), so the
-   whole optimization history sits in Argon's 1M-token context.
-6. Once calibrated, `rc.predict` applies a real-world change ("remove domino 4") and predicts the outcome,
-   then scores the prediction against a real take.
-
-The full spec is in [SPEC.md](SPEC.md).
+- [Status](#status) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Editor](#editor)
+- [Configuration](#configuration) · [CLI and API](#cli-and-api) · [Repository map](#repository-map)
+- [Testing](#testing) · [Privacy](#privacy) · [Contributing](#contributing) · [License](#license)
 
 ## Status
 
 | Area | State |
 |---|---|
-| MJCF compiler, MuJoCo rollout, event extraction | Implemented, tested offline |
-| Side-by-side composite, metrics, HTML report | Implemented, tested offline |
-| Calibration loop (full-history and last-round ablation) | Implemented; tested with a stubbed model |
-| Prediction mode | Implemented; tested with a stubbed model |
-| Webcam capture | Implemented, not yet tested on hardware |
-| Live Gemini calls | Implemented against the installed `google-genai` Interactions API; **not yet run with a valid key** |
-| Managed Agent (Antigravity) mode, ramps and balls | Roadmap |
+| Per-second stable keyframe selection | Implemented, tested |
+| Structure-from-motion (camera path, point cloud), floor alignment, scale prior | Implemented, tested against ground truth |
+| Scene contract with validation | Implemented, tested |
+| Verify (render from every keyframe camera, SSIM, edge F1, points on surface) | Implemented, tested |
+| MJCF export, glTF export | Implemented; MJCF tested |
+| Local server (upload, pipeline, save, verify, export) | Implemented, tested |
+| CAD editor | Implemented, checked in a browser |
+| Gemini read / parallel zone agents / critique | Implemented against the installed SDK; **not run yet** (no API key in this environment) |
+| Managed Agents for zone agents, bundle adjustment | Roadmap |
+
+See [SPEC.md](SPEC.md) for the full design.
 
 ## Quick start
 
-Requires Python 3.11+, [uv](https://docs.astral.sh/uv/) and `ffmpeg` on `PATH`.
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). The editor loads three.js from jsDelivr.
 
 ```powershell
 uv sync
-Copy-Item .env.example .env   # then set GEMINI_API_KEY and GEMINI_MODEL
-uv run pytest -q              # offline checks, no API key needed
-
-# Synthetic self-test: a hidden ground-truth scene stands in for reality
-uv run python -m rc.synth --out runs/synthetic
-uv run python -m rc.loop --video runs/synthetic/real.mp4 --gt runs/synthetic/ground_truth.json --rounds 5
+uv run python -m engine.server
 ```
 
-Real take:
+Open http://127.0.0.1:8765 and choose a video. Keep the camera moving slowly; a pan around a room works best.
+
+Command line instead:
 
 ```powershell
-uv run python -m rc.capture --out runs/take1.mp4 --seconds 8
-uv run python -m rc.loop --video runs/take1.mp4 --rounds 5
-uv run python -m rc.predict --run runs/<run-id> --change "remove domino 4" --real runs/take2.mp4
+uv run python -m engine.pipeline --video C:\path\to\walkthrough.mp4
 ```
 
-Open `runs/<run-id>/report.html` to see each round.
+## How it works
+
+1. **Keyframes**: 8 candidates per second are scored for sharpness and stillness; the most stable one becomes
+   that second's keyframe (`keyframes.json` keeps every candidate's scores).
+2. **Geometry**: OpenCV SIFT + essential matrix + PnP + triangulation recover a camera pose per keyframe and a
+   coloured point cloud.
+3. **Scene**: a RANSAC floor plane sets y = 0 and +Y up; scale comes from a 1.5 m camera-height prior until you
+   calibrate in the editor.
+4. **Gemini** (when configured): Argon reads the whole video once; one agent per zone builds that zone in
+   parallel from its keyframes, measured camera poses and visible points; a critique loop compares renders
+   with the real keyframes and sends each zone's differences back to its agent.
+5. **Verify**: the replica is rendered from every keyframe camera and scored against the real frame.
+
+## Editor
+
+| Action | How |
+|---|---|
+| Move / rotate / scale | W / E / R, or the toolbar; toggle world or local axes |
+| Snap | 1, 5, 10 or 25 cm and 15° |
+| Exact values | Properties panel, in metres and degrees |
+| Add, duplicate, delete | Left panel, Ctrl+D, Delete |
+| Undo / redo | Ctrl+Z / Ctrl+Y |
+| Drop to floor, fit to points | Toolbar |
+| Measure, set scale | M, click two points; enter the true length and Set scale |
+| Match to the video | Click a keyframe in the strip to view through its camera with the photo overlaid |
+| Verify | Renders every keyframe; worst matches listed first |
+| Save, export | Ctrl+S; Export glTF (.glb); Export MJCF |
 
 ## Configuration
 
+`.env` in the project root (see `.env.example`). Values in `.env` override the shell.
+
 | Variable | Default | Effect |
 |---|---|---|
-| `GEMINI_API_KEY` | none (required) | Gemini API key. A value in `.env` overrides the shell. |
-| `GEMINI_MODEL` | none (required) | Model for perception, critique and prediction, e.g. `gemini-4-argon`. |
-| `GEMINI_FAST_MODEL` | empty | Optional cheaper model; not used by default. |
-| `RC_VIDEO_FPS` | `0` | Frame sampling rate sent to Gemini; `0` uses the API default. |
+| `GEMINI_API_KEY` | none | Enables the read, build and critique stages. Without it they are recorded as skipped. |
+| `GEMINI_MODEL` | none | Model for reading and critique, e.g. `gemini-4-argon`. |
+| `GEMINI_AGENT_MODEL` | `GEMINI_MODEL` | Model for the parallel zone agents. |
 
-## CLI
+Pipeline flags: `--per-second` (candidates per second, 8), `--hfov` (camera horizontal FOV, 65),
+`--max-keyframes` (SfM cap, 400), `--rounds` (critique rounds, 2).
 
-| Command | Purpose |
+## CLI and API
+
+| Command / route | Purpose |
 |---|---|
-| `python -m rc.capture --out F [--seconds 8] [--cam 0]` | Record a webcam take (SPACE to start, Q to stop). |
-| `python -m rc.synth [--out D] [--n 8] [--friction 0.35]` | Render a ground-truth scene as a fake real video. |
-| `python -m rc.loop --video F [--rounds 5] [--history full\|last] [--gt G]` | Run calibration. `last` is the no-memory ablation. |
-| `python -m rc.predict --run D --change TEXT [--real F]` | Predict an intervention and optionally score it. |
-
-## Architecture
-
-```
-video ─► perceive (Argon) ─► Scene₀ + real timeline
-                                │
-          ┌─────────────────────▼─────────────────────┐
-          │ compile → MJCF → MuJoCo step + render     │
-          │ sim timeline + REAL|SIM composite         │◄──┐
-          └─────────────────────┬─────────────────────┘   │
-                                ▼                         │
-                 critic (Argon, chained interaction       │
-                 holding all prior rounds) ─► Sceneₙ₊₁ ───┘
-```
-
-Argon never writes XML. It edits a JSON scene graph that is clamped to sane physical ranges and compiled to
-MJCF with ElementTree, so model output can't produce malformed or injected markup.
+| `python -m engine.server [--port 8765]` | Editor and API on 127.0.0.1 |
+| `python -m engine.pipeline --video F [--run ID]` | Run the pipeline without the editor |
+| `POST /api/runs` (raw body, `X-Filename`) | Upload a video and start a run |
+| `GET /api/runs`, `GET /api/runs/{id}/status` | Runs and stage progress |
+| `GET` / `PUT /api/runs/{id}/scene` | Read or save the scene (validated) |
+| `POST /api/runs/{id}/verify`, `POST /api/runs/{id}/rebuild` | Verify, or rerun the pipeline |
+| `GET /api/runs/{id}/scene.mjcf` | MuJoCo export |
 
 ## Repository map
 
 | Path | Role |
 |---|---|
-| `rc/scene.py` | Scene schema, sanitizer, MJCF compiler |
-| `rc/sim.py` | MuJoCo rollout, offscreen render, contact and tilt events |
-| `rc/video.py` | ffmpeg encoding, OpenCV decoding, side-by-side composite |
-| `rc/metrics.py` | Event matching, timing error, recall |
-| `rc/llm.py` | Interactions API wrapper (inline video, JSON schema, chaining) |
-| `rc/prompts.py` | Perception, critic and prediction prompts |
-| `rc/loop.py` | Calibration loop CLI |
-| `rc/predict.py` | Intervention prediction CLI |
-| `rc/capture.py` | Webcam capture |
-| `rc/synth.py` | Synthetic ground-truth scenes |
-| `rc/report.py` | Static HTML report per run |
-| `tests/` | Offline tests (Gemini stubbed) |
-| `docs/spec.html` | Spec page |
+| `engine/keyframes.py` | Per-second stable keyframe selection |
+| `engine/sfm.py` | Structure-from-motion, floor fit, alignment |
+| `engine/scene.py` | Scene contract (pydantic) |
+| `engine/verify.py` | Render-and-compare, surface coverage |
+| `engine/mjcf.py` | Scene → MJCF (Y-up → Z-up, keyframe cameras) |
+| `engine/understand.py` | Gemini read, parallel zone agents, critique |
+| `engine/llm.py` | Interactions API wrapper, gated on the key |
+| `engine/pipeline.py` | Stage runner and status |
+| `engine/server.py` | Local HTTP server |
+| `web/` | CAD editor (three.js) |
+| `tests/` | Engine tests; `synthetic.py` renders a ground-truth room for them |
 
 ## Testing
 
@@ -137,21 +126,21 @@ MJCF with ElementTree, so model output can't produce malformed or injected marku
 uv run pytest -q
 ```
 
-The tests run the real MuJoCo, ffmpeg, metrics and report code with the model stubbed. They cover MJCF
-escaping and clamping, the domino event chain, timeline alignment, loop convergence with full-history
-chaining, and prediction of a broken chain.
+The tests render a textured room with MuJoCo from a known camera path, then check: blurred frames are never
+chosen; the recovered camera path is within 3 cm of ground truth (measured: 8 mm mean); the floor is found;
+Gemini stages are skipped without a key; scene validation rejects bad input; MJCF axes and rotations are
+correct; placing the true table raises both points-on-surface and edge F1; the server rejects invalid scenes
+and path traversal.
 
-## Privacy and cost
+## Privacy
 
-Captured videos and scene graphs are sent to the Gemini API. Clips are capped at 10 s and downscaled to
-640 px wide before upload. The full-history mode re-sends nothing: earlier rounds live server-side in the
-chained interaction.
+Videos and everything derived from them stay in `runs/` on this machine. With Gemini configured, the video,
+keyframes and point samples are sent to the Gemini API. The server binds to 127.0.0.1 only.
 
 ## Contributing
 
-Keep these invariants: model output only ever reaches MuJoCo through `sanitize` and `compile_mjcf`; model
-IDs come from env, never code; every round writes its scene, MJCF, videos and metrics so runs can be
-audited.
+Keep these invariants: geometry comes from measurement, never from the model; every scene write goes through
+`engine/scene.py` validation; model IDs come from env, never code; no sample or demo data ships with the app.
 
 ## License
 

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reality Engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/web/editor.css">
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg width="26" height="26" viewBox="0 0 28 28" aria-hidden="true"><path d="M4 20 L14 25 L24 20 L24 9 L14 4 L4 9 Z" fill="none" stroke="#8b9dff" stroke-width="1.6"/><path d="M4 9 L14 14 L24 9 M14 14 L14 25" fill="none" stroke="#8b9dff" stroke-width="1.6"/><circle cx="14" cy="14" r="2.6" fill="#f2a541"/></svg>
+    <span>Reality Engine</span>
+  </div>
+  <label class="sr" for="run-select">Run</label>
+  <select id="run-select"><option value="">No runs yet</option></select>
+  <label class="btn primary" for="upload">Add video<input id="upload" type="file" accept="video/*" hidden></label>
+  <div id="stages" class="stages" aria-label="Pipeline stages"></div>
+  <span class="spacer"></span>
+  <span id="gemini" class="chip"></span>
+  <button id="btn-rebuild" class="btn" type="button">Rebuild</button>
+  <button id="btn-verify" class="btn" type="button">Verify</button>
+  <button id="btn-save" class="btn" type="button">Save</button>
+  <button id="btn-glb" class="btn" type="button">Export glTF</button>
+  <a id="btn-mjcf" class="btn" href="#" download>Export MJCF</a>
+</header>
+
+<div class="layout">
+  <aside class="left">
+    <section>
+      <h2>Add</h2>
+      <div class="grid4">
+        <button class="btn" type="button" data-add="box">Box</button>
+        <button class="btn" type="button" data-add="cylinder">Cylinder</button>
+        <button class="btn" type="button" data-add="sphere">Sphere</button>
+        <button class="btn" type="button" data-add="plane">Plane</button>
+      </div>
+    </section>
+    <section class="grow">
+      <h2>Objects <span id="obj-count" class="muted"></span></h2>
+      <input id="filter" type="search" placeholder="Filter objects" aria-label="Filter objects">
+      <ul id="outliner" class="list"></ul>
+    </section>
+  </aside>
+
+  <main class="center">
+    <div class="toolbar" role="toolbar" aria-label="Tools">
+      <div class="seg" role="group" aria-label="Transform mode">
+        <button class="btn on" type="button" data-mode="translate" title="Move (W)">Move</button>
+        <button class="btn" type="button" data-mode="rotate" title="Rotate (E)">Rotate</button>
+        <button class="btn" type="button" data-mode="scale" title="Scale (R)">Scale</button>
+      </div>
+      <button id="btn-space" class="btn" type="button" title="Toggle world/local axes">World</button>
+      <label class="check"><input id="snap" type="checkbox" checked> Snap</label>
+      <label class="sr" for="snap-step">Snap step</label>
+      <select id="snap-step"><option value="0.01">1 cm</option><option value="0.05" selected>5 cm</option><option value="0.1">10 cm</option><option value="0.25">25 cm</option></select>
+      <button id="btn-measure" class="btn" type="button" title="Measure (M)">Measure</button>
+      <button id="btn-floor" class="btn" type="button" title="Drop to floor">Drop to floor</button>
+      <button id="btn-fit" class="btn" type="button" title="Fit box to the reconstructed points inside it">Fit to points</button>
+      <button id="btn-dup" class="btn" type="button" title="Duplicate (Ctrl+D)">Duplicate</button>
+      <button id="btn-del" class="btn" type="button" title="Delete (Del)">Delete</button>
+      <button id="btn-undo" class="btn" type="button" title="Undo (Ctrl+Z)">Undo</button>
+      <button id="btn-redo" class="btn" type="button" title="Redo (Ctrl+Y)">Redo</button>
+      <span class="spacer"></span>
+      <label class="check"><input id="show-points" type="checkbox" checked> Points</label>
+      <label class="check"><input id="show-cams" type="checkbox" checked> Cameras</label>
+    </div>
+    <div id="viewport" class="viewport">
+      <img id="photo" class="photo" alt="" hidden>
+      <div id="empty" class="empty">
+        <h1>Drop a video of any space</h1>
+        <p>Reality Engine picks the most stable frame of every second, reconstructs the camera path and a 3D point cloud, and gives you a CAD workspace to build the exact replica on top of it.</p>
+        <label class="btn primary" for="upload">Choose a video</label>
+      </div>
+      <div id="hud" class="hud" hidden></div>
+    </div>
+    <div class="photo-bar" id="photo-bar" hidden>
+      <span id="photo-label" class="mono"></span>
+      <label for="photo-opacity">Photo overlay</label>
+      <input id="photo-opacity" type="range" min="0" max="100" value="50">
+      <button id="btn-exit-photo" class="btn" type="button">Free camera</button>
+    </div>
+    <div class="strip" id="strip" aria-label="Keyframes"></div>
+  </main>
+
+  <aside class="right">
+    <section id="props">
+      <h2>Properties</h2>
+      <p class="muted" id="no-sel">Select an object, or add one from the left.</p>
+      <form id="prop-form" hidden>
+        <label>Name <input id="p-name" maxlength="80"></label>
+        <div class="row3"><span class="lbl">Position (m)</span><input id="p-px" type="number" step="0.01" aria-label="Position x"><input id="p-py" type="number" step="0.01" aria-label="Position y"><input id="p-pz" type="number" step="0.01" aria-label="Position z"></div>
+        <div class="row3"><span class="lbl">Rotation (°)</span><input id="p-rx" type="number" step="1" aria-label="Rotation x"><input id="p-ry" type="number" step="1" aria-label="Rotation y"><input id="p-rz" type="number" step="1" aria-label="Rotation z"></div>
+        <div class="row3"><span class="lbl">Size (m)</span><input id="p-sx" type="number" step="0.01" min="0.001" aria-label="Size x"><input id="p-sy" type="number" step="0.01" min="0.001" aria-label="Size y"><input id="p-sz" type="number" step="0.01" min="0.001" aria-label="Size z"></div>
+        <div class="row2"><label>Color <input id="p-color" type="color"></label><label>Material <input id="p-material" maxlength="80"></label></div>
+        <label>Zone <input id="p-zone" maxlength="80"></label>
+        <label>Notes <textarea id="p-notes" maxlength="500" rows="2"></textarea></label>
+        <label class="check"><input id="p-locked" type="checkbox"> Locked</label>
+        <p class="muted mono" id="p-meta"></p>
+      </form>
+    </section>
+    <section>
+      <h2>Measure &amp; calibrate</h2>
+      <p class="mono" id="measure-out">Click Measure, then two points.</p>
+      <div class="row2"><label>True length (m) <input id="true-len" type="number" step="0.001" min="0"></label><button id="btn-calibrate" class="btn" type="button">Set scale</button></div>
+      <p class="muted" id="calib"></p>
+    </section>
+    <section class="grow">
+      <h2>Verify</h2>
+      <div id="verify-summary" class="muted">Run Verify to render the replica from every keyframe and score it against the video.</div>
+      <img id="verify-img" class="verify-img" alt="Real keyframe and replica render side by side" hidden>
+      <ul id="verify-list" class="list"></ul>
+    </section>
+    <section>
+      <h2>Log</h2>
+      <pre id="log" class="log"></pre>
+    </section>
+  </aside>
+</div>
+<script type="module" src="/web/editor.js"></script>
+</body>
+</html>

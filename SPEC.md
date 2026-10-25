@@ -20,7 +20,8 @@ aisle, a facilities planner re-arranging an office, a game/VFX artist blocking o
 | Stage | What happens | Needs Gemini |
 |---|---|---|
 | **keyframes** | Sample N frames every second (default 8); score each for sharpness (Laplacian variance) and stillness (frame difference); keep the most stable frame per second. All candidate scores are kept. | no |
-| **geometry** | Sequential structure-from-motion on the keyframes (OpenCV SIFT, essential matrix, PnP, triangulation): a camera pose per keyframe and a coloured 3D point cloud. | no |
+| **geometry frames** | The same stability scoring in 4 windows per second (default), giving overlapping frames for reconstruction. | no |
+| **geometry** | Sequential structure-from-motion on the geometry frames (OpenCV SIFT, essential matrix, PnP, triangulation): a camera pose per keyframe and a coloured 3D point cloud. | no |
 | **scene** | RANSAC floor plane → world aligned so floor is y = 0, +Y up; scaled by a 1.5 m camera-height prior until the user calibrates with a measured distance. | no |
 | **read** | Argon watches the entire video in one context: zones with time ranges, every object seen, text read, light sources. | yes |
 | **build** | One agent per zone, in parallel. Each forks the reading interaction (whole video already in context) and gets its zone's keyframes, their measured camera poses and the 3D points each camera sees; it reasons second by second, then returns objects in the measured frame. | yes |

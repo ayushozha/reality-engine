@@ -55,7 +55,7 @@ def _umeyama_residual(est, true):
 
 
 def _true_centers(built):
-    frames = [k["frame"] for k in json.loads((built / "keyframes.json").read_text())["keyframes"]]
+    frames = [k["frame"] for k in json.loads((built / "geoframes.json").read_text())["keyframes"]]
     n, true = SECONDS * FPS, []
     for i in frames:
         a = math.radians(-125 + 70 * i / (n - 1))
@@ -77,7 +77,7 @@ def _similarity(src, dst):
 
 def test_camera_path_matches_ground_truth(built):
     scene = Scene.model_validate_json((built / "scene.json").read_text())
-    assert len(scene.cameras) == SECONDS
+    assert len(scene.cameras) == SECONDS * pipeline.GEO_WINDOWS  # every dense geometry frame registered
     est = np.array([c.position for c in scene.cameras])
     res = _umeyama_residual(est, _true_centers(built))
     assert res.mean() < 0.03 and res.max() < 0.06  # metres, over a 3.1 m path

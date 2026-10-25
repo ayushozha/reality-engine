@@ -95,17 +95,24 @@ def _hex(rgb) -> str:
     return "#" + "".join(f"{int(c):02x}" for c in rgb)
 
 
-def run(run_dir: Path, per_second=8, hfov=65.0, max_keyframes=400, rounds=2, log=None):
+GEO_WINDOWS = 4  # geometry frames per second
+
+
+def run(run_dir: Path, per_second=8, hfov=65.0, max_keyframes=400, rounds=2, log=None, geo_windows=GEO_WINDOWS):
     st = Status(run_dir)
     say = log or st.log
     try:
         st.set("keyframes", "running")
         m = keyframes.select(input_video(run_dir), run_dir, per_second=per_second)
         kfs = m["keyframes"]
-        st.set("keyframes", "done", f"{len(kfs)} keyframes from {len(kfs) * per_second} candidates")
+        # Denser stable frames for geometry: one per 1/GEO_WINDOWS s, so neighbours overlap enough to triangulate.
+        g = keyframes.select(input_video(run_dir), run_dir, per_second=max(per_second, 2 * geo_windows),
+                             windows_per_second=geo_windows, subdir="geoframes", manifest_name="geoframes.json")
+        geo = g["keyframes"]
+        st.set("keyframes", "done", f"{len(kfs)} per-second keyframes, {len(geo)} geometry frames")
 
         st.set("geometry", "running")
-        use = kfs if len(kfs) <= max_keyframes else [kfs[round(i)] for i in np.linspace(0, len(kfs) - 1, max_keyframes)]
+        use = geo if len(geo) <= max_keyframes else [geo[round(i)] for i in np.linspace(0, len(geo) - 1, max_keyframes)]
         rec = sfm.reconstruct([run_dir / k["image"] for k in use], hfov_deg=hfov, log=say)
         al = sfm.align(rec)
         sfm.write_points(run_dir / "points.json", al["xyz"], al["rgb"])
@@ -118,7 +125,7 @@ def run(run_dir: Path, per_second=8, hfov=65.0, max_keyframes=400, rounds=2, log
         for i, pos, Rw in al["cams"]:
             k = use[i]
             fov_y = math.degrees(2 * math.atan(h0 / 2 / K[1, 1]))
-            cams.append(Camera(id=f"kf{k['second']:05d}", image=k["image"], t=k["t"], position=tuple(map(float, pos)),
+            cams.append(Camera(id=f"g{k['window']:05d}", image=k["image"], t=k["t"], position=tuple(map(float, pos)),
                                quaternion=sfm.quat_from_matrix(Rw), fov_y=fov_y, width=k["width"], height=k["height"]))
         xyz, rgb = al["xyz"], al["rgb"]
         extent = float(np.linalg.norm(np.percentile(xyz, 95, 0) - np.percentile(xyz, 5, 0))) or 1.0

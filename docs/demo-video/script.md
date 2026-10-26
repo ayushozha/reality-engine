@@ -1,7 +1,8 @@
 # Two-minute demo recording script
 
 Final deliverable: `Reality_Engine_2min.mp4`, exactly 120 seconds, H.264/AAC at 1280x720.
-Narration uses ElevenLabs' Anika - Sweet and Lively voice with the user's supplied opening.
+Narration uses ElevenLabs' Adam - Radio Announcer voice (male, American English)
+with the user's supplied opening. The generated voice ID is `wBXNqKUATyqu0RtYt25i`.
 The two generated sections were gently slowed without changing pitch, joined into
 `narration-elevenlabs.mp3` (117 seconds), and normalized for consistent volume.
 The video ends with three seconds for the closing image.

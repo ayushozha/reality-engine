@@ -1,0 +1,13 @@
+Hi I am Ayush and I made this with Kush.
+
+A phone video shows a room, but it doesn't give you objects you can move or use in a simulator.
+
+We built Reality Engine to turn that walkthrough into an editable 3D starting point.
+
+OpenCV recovers camera positions and a point cloud. Gemini 4 Argon reads the whole video in one context, places objects, then compares renders against the original footage and repairs the scene.
+
+Here's our actual phone clip and its reconstruction: sixteen editable objects after two critique rounds.
+
+In the editor, I can select and move objects, compare against the original photo, and export to glTF or MuJoCo.
+
+It's a coarse prototype, but the complete video-to-editable-scene loop works.

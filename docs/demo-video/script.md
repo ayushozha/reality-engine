@@ -1,7 +1,10 @@
 # Two-minute demo recording script
 
 Final deliverable: `Reality_Engine_2min.mp4`, exactly 120 seconds, H.264/AAC at 1280x720.
-Narration uses local Windows speech synthesis with the user's supplied opening.
+Narration uses ElevenLabs' Anika - Sweet and Lively voice with the user's supplied opening.
+The two generated sections were gently slowed without changing pitch, joined into
+`narration-elevenlabs.mp3` (117 seconds), and normalized for consistent volume.
+The video ends with three seconds for the closing image.
 Rebuild on Windows with `./docs/demo-video/build.ps1`; requires FFmpeg and FFprobe on PATH,
 plus the local phone recording at `runs/room-walkthrough/input.mov`.
 The editor recording is genuine browser interaction; edits were not saved.

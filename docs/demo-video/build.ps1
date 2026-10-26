@@ -8,14 +8,9 @@ New-Item -ItemType Directory -Path $segments -Force | Out-Null
 $ffmpeg = (Get-Command ffmpeg -ErrorAction Stop).Source
 $ffprobe = (Get-Command ffprobe -ErrorAction Stop).Source
 $fontName = 'Segoe UI'
-$narration = Join-Path $base 'narration.wav'
+$narration = Join-Path $base 'narration-elevenlabs.mp3'
 if (-not (Test-Path -LiteralPath $narration)) {
-    Add-Type -AssemblyName System.Speech
-    $speaker = New-Object System.Speech.Synthesis.SpeechSynthesizer
-    try {
-        $speaker.SetOutputToWaveFile($narration)
-        $speaker.Speak((Get-Content -LiteralPath (Join-Path $base 'narration.txt') -Raw))
-    } finally { $speaker.Dispose() }
+    throw 'Missing approved ElevenLabs narration: narration-elevenlabs.mp3'
 }
 
 function Paint-Image([string]$Path, [string]$Title, [string[]]$Lines, [bool]$Overlay = $false) {
@@ -101,7 +96,7 @@ foreach ($scene in $scenes) {
 $list = Join-Path $segments 'concat.txt'
 [IO.File]::WriteAllLines($list,$manifest,[Text.UTF8Encoding]::new($false))
 $final = Join-Path $base 'Reality_Engine_2min.mp4'
-& $ffmpeg -hide_banner -loglevel error -y -f concat -safe 0 -i $list -i (Join-Path $base 'narration.wav') -map 0:v:0 -map 1:a:0 -c:v copy -af 'apad=whole_dur=120,atrim=duration=120,asetpts=PTS-STARTPTS' -c:a aac -b:a 192k -t 120 -movflags +faststart $final
+& $ffmpeg -hide_banner -loglevel error -y -f concat -safe 0 -i $list -i $narration -map 0:v:0 -map 1:a:0 -c:v copy -af 'apad=whole_dur=120,atrim=duration=120,asetpts=PTS-STARTPTS' -c:a aac -b:a 192k -t 120 -movflags +faststart $final
 if ($LASTEXITCODE -ne 0) { throw 'Final audio/video mux failed.' }
 & $ffprobe -v error -show_entries format=duration,size:stream=codec_name,width,height,r_frame_rate -of json $final
 Write-Host "Ready: $final"
